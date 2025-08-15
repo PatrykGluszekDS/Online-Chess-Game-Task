@@ -116,3 +116,31 @@ body{
 }
 .square.light .piece{ color:#111; }
 .square.dark  .piece{ color:#fff; }
+
+.square.selected{
+  outline: 3px solid rgba(255, 215, 0, .9);
+  outline-offset: -3px;
+}
+
+.square.hint-move::after,
+.square.hint-capture::after{
+  content:"";
+  position:absolute; inset:0;
+  display:block;
+}
+
+.square.hint-move::after{
+  /* dot for quiet moves */
+  width:36%;
+  height:36%;
+  margin:auto;
+  border-radius:50%;
+  background: rgba(0,0,0,.25);
+}
+
+.square.hint-capture::after{
+  /* ring for captures */
+  border: 5px solid rgba(230, 57, 70, .9);
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 9999px rgba(230,57,70,.08);
+}

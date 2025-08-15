@@ -1,4 +1,4 @@
-// --- Board generation (from Step 2) -----------------------------------------
+// --- Board generation --------------------------------------------------------
 const FILES = ["a","b","c","d","e","f","g","h"];   // left → right
 const RANKS = [8,7,6,5,4,3,2,1];                   // top → bottom (white at bottom)
 
@@ -44,11 +44,10 @@ function drawCoords() {
   }
 }
 
-
+// --- Piece model, FEN, rendering --------------------------------------------
 const COLORS = { WHITE: "w", BLACK: "b" };
 const TYPES  = { K:"K", Q:"Q", R:"R", B:"B", N:"N", P:"P" };
 
-// Unicode glyphs keep things asset-free
 const GLYPH = {
   w: { K:"♔", Q:"♕", R:"♖", B:"♗", N:"♘", P:"♙" },
   b: { K:"♚", Q:"♛", R:"♜", B:"♝", N:"♞", P:"♟" },
@@ -56,23 +55,15 @@ const GLYPH = {
 
 const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
-// Game state (minimal for now; will expand in next steps)
 const State = {
-  board: new Map(),     // square -> piece | null
+  board: new Map(),     // square -> piece
   turn: COLORS.WHITE,   // 'w' or 'b'
   pieces: new Map(),    // id -> piece
-  moveHistory: [],      // SAN later
+  moveHistory: [],
 };
 
-// piece object: { id, type, color, square, hasMoved }
 function makePiece(type, color, square, index) {
-  return {
-    id: `${color}${type}${index}`, // e.g., wP1, bN2
-    type,
-    color,
-    square,
-    hasMoved: false,
-  };
+  return { id: `${color}${type}${index}`, type, color, square, hasMoved: false };
 }
 
 function parseFEN(fen) {
@@ -83,26 +74,16 @@ function parseFEN(fen) {
   State.board.clear();
   State.pieces.clear();
 
-  // counters for stable ids by piece type
-  const counters = {
-    w: {K:0,Q:0,R:0,B:0,N:0,P:0},
-    b: {K:0,Q:0,R:0,B:0,N:0,P:0},
-  };
+  const counters = { w:{K:0,Q:0,R:0,B:0,N:0,P:0}, b:{K:0,Q:0,R:0,B:0,N:0,P:0} };
 
   for (let rIdx = 0; rIdx < 8; rIdx++) {
     const rankStr = ranks[rIdx];
     let fileIdx = 0;
 
     for (const ch of rankStr) {
-      if (/\d/.test(ch)) {
-        fileIdx += Number(ch);
-        continue;
-      }
-      const isUpper = ch === ch.toUpperCase();
-      const color = isUpper ? COLORS.WHITE : COLORS.BLACK;
+      if (/\d/.test(ch)) { fileIdx += Number(ch); continue; }
+      const color = ch === ch.toUpperCase() ? COLORS.WHITE : COLORS.BLACK;
       const type = ch.toUpperCase();
-      if (!TYPES[type]) throw new Error(`Invalid piece in FEN: ${ch}`);
-
       const file = FILES[fileIdx];
       const rank = RANKS[rIdx];
       const square = `${file}${rank}`;
@@ -114,17 +95,13 @@ function parseFEN(fen) {
       State.board.set(square, piece);
       fileIdx += 1;
     }
-
     if (fileIdx !== 8) throw new Error("Invalid FEN: rank length mismatch");
   }
-
   State.turn = active === "b" ? COLORS.BLACK : COLORS.WHITE;
 }
 
 function clearPiecesFromDOM() {
-  for (const sq of boardEl.children) {
-    sq.innerHTML = ""; // keep square element, remove piece child
-  }
+  for (const sq of boardEl.children) sq.innerHTML = "";
 }
 
 function renderPieces() {
@@ -140,17 +117,13 @@ function renderPieces() {
     span.textContent = GLYPH[piece.color][piece.type];
     span.dataset.pid = piece.id;
     span.title = `${piece.color === "w" ? "White" : "Black"} ${nameOf(piece.type)} @ ${square}`;
-
     sqEl.appendChild(span);
   }
-
   updateTurnBanner();
 }
 
 function nameOf(type) {
-  return (
-    {K:"King", Q:"Queen", R:"Rook", B:"Bishop", N:"Knight", P:"Pawn"}[type] || type
-  );
+  return ({K:"King", Q:"Queen", R:"Rook", B:"Bishop", N:"Knight", P:"Pawn"}[type] || type);
 }
 
 function updateTurnBanner() {
@@ -158,11 +131,130 @@ function updateTurnBanner() {
   el.textContent = State.turn === "w" ? "White to move" : "Black to move";
 }
 
+// --- Step 4: Select & highlight pseudo-legal moves ---------------------------
+
+const UI = {
+  selected: null, // piece id
+};
+
+function clearHints() {
+  boardEl.querySelectorAll(".selected").forEach(el => el.classList.remove("selected"));
+  boardEl.querySelectorAll(".hint-move").forEach(el => el.classList.remove("hint-move"));
+  boardEl.querySelectorAll(".hint-capture").forEach(el => el.classList.remove("hint-capture"));
+}
+
+function selectSquare(square) {
+  clearHints();
+
+  const piece = State.board.get(square);
+  if (!piece) { UI.selected = null; return; }
+  if (piece.color !== State.turn) {
+    // Only allow selecting the side to move (helps UX).
+    UI.selected = null; return;
+  }
+
+  UI.selected = piece.id;
+
+  const sqEl = document.getElementById(square);
+  sqEl.classList.add("selected");
+
+  const moves = pseudoLegalMoves(piece);
+  for (const mv of moves) {
+    const destEl = document.getElementById(mv.to);
+    if (!destEl) continue;
+    destEl.classList.add(mv.capture ? "hint-capture" : "hint-move");
+  }
+}
+
+// Compute moves ignoring checks/pins & special moves (no castling/en passant)
+// Includes: pawn (single/double, diagonal captures), knight, bishop, rook, queen, king(1-square).
+function pseudoLegalMoves(piece) {
+  const res = [];
+  const { fileIdx, rank } = parseSquare(piece.square);
+
+  const add = (f, r, captureOnly=false, stopOnHit=true) => {
+    if (f < 0 || f > 7 || r < 1 || r > 8) return "stop";
+    const to = `${FILES[f]}${r}`;
+    const occ = State.board.get(to);
+    if (occ) {
+      if (occ.color !== piece.color) {
+        res.push({ from: piece.square, to, capture: true });
+      }
+      return "stop";
+    } else {
+      if (!captureOnly) res.push({ from: piece.square, to, capture: false });
+      return stopOnHit ? undefined : "cont";
+    }
+  };
+
+  // sliding helper
+  const ray = (df, dr) => {
+    let f = fileIdx + df, r = rank + dr;
+    while (true) {
+      const resFlag = add(f, r);
+      if (resFlag === "stop") break;
+      if (resFlag === undefined) break; // single step
+      f += df; r += dr;
+    }
+  };
+
+  if (piece.type === "P") {
+    const dir = piece.color === "w" ? 1 : -1;
+    // forward one
+    add(fileIdx, rank + dir, false, true);
+    // forward two from start rank
+    const startRank = piece.color === "w" ? 2 : 7;
+    if (rank === startRank) {
+      const oneAhead = `${FILES[fileIdx]}${rank + dir}`;
+      const twoAhead = `${FILES[fileIdx]}${rank + 2*dir}`;
+      if (!State.board.get(oneAhead) && !State.board.get(twoAhead)) {
+        res.push({ from: piece.square, to: twoAhead, capture: false });
+      }
+    }
+    // captures
+    const left = fileIdx - 1, right = fileIdx + 1;
+    for (const f of [left, right]) {
+      if (f < 0 || f > 7) continue;
+      const to = `${FILES[f]}${rank + dir}`;
+      const occ = State.board.get(to);
+      if (occ && occ.color !== piece.color) {
+        res.push({ from: piece.square, to, capture: true });
+      }
+    }
+    return res;
+  }
+
+  if (piece.type === "N") {
+    const deltas = [[1,2],[2,1],[2,-1],[1,-2],[-1,-2],[-2,-1],[-2,1],[-1,2]];
+    for (const [df, dr] of deltas) add(fileIdx + df, rank + dr, false, true);
+    return res;
+  }
+
+  if (piece.type === "B" || piece.type === "Q") {
+    ray(1,1); ray(1,-1); ray(-1,1); ray(-1,-1);
+  }
+  if (piece.type === "R" || piece.type === "Q") {
+    ray(1,0); ray(-1,0); ray(0,1); ray(0,-1);
+  }
+  if (piece.type === "K") {
+    const deltas = [[1,1],[1,0],[1,-1],[0,1],[0,-1],[-1,1],[-1,0],[-1,-1]];
+    for (const [df, dr] of deltas) add(fileIdx + df, rank + dr, false, true);
+  }
+  return res;
+}
+
+function parseSquare(square) {
+  const fileIdx = FILES.indexOf(square[0]);
+  const rank = Number(square.slice(1));
+  return { fileIdx, rank };
+}
+
 // --- Lifecycle ----------------------------------------------------------------
 
 function loadPosition(fen = START_FEN) {
   parseFEN(fen);
   renderPieces();
+  clearHints();
 }
 
 function init() {
@@ -170,12 +262,19 @@ function init() {
   drawCoords();
   loadPosition(START_FEN);
 
-  // Restart to the initial setup (will also clear history later)
+  // Restart
   document.getElementById("btn-restart").addEventListener("click", () => {
     loadPosition(START_FEN);
     document.getElementById("move-list").innerHTML = "";
     document.getElementById("captured-white").innerHTML = "";
     document.getElementById("captured-black").innerHTML = "";
+  });
+
+  // Delegate clicks: select a square to see moves
+  boardEl.addEventListener("click", (e) => {
+    const sqEl = e.target.closest(".square");
+    if (!sqEl) return;
+    selectSquare(sqEl.id);
   });
 }
 
