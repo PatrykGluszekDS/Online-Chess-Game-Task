@@ -105,3 +105,14 @@ body{
 }
 
 .app-footer{ opacity:.7; justify-content:center; }
+
+/* --- pieces (Step 3) --- */
+.piece{
+  font-size: clamp(28px, 6vw, 56px);
+  line-height: 1;
+  user-select: none;
+  cursor: pointer;
+  text-shadow: 0 1px 0 rgba(0,0,0,.25);
+}
+.square.light .piece{ color:#111; }
+.square.dark  .piece{ color:#fff; }
