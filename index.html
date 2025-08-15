@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Online Chess</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>Online Chess</h1>
+    <div class="status">
+      <span id="turn-indicator">White to move</span>
+      <button id="btn-restart" type="button" title="Restart game">Restart</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="board-wrap">
+      <!-- Board squares will be injected by JS in Step 2 -->
+      <div id="board" aria-label="Chess board" role="grid"></div>
+      <div class="coords coords-files" aria-hidden="true"></div>
+      <div class="coords coords-ranks" aria-hidden="true"></div>
+    </section>
+
+    <aside class="side">
+      <section class="panel">
+        <h2>Move History</h2>
+        <ol id="move-list" class="move-list"></ol>
+      </section>
+
+      <section class="panel">
+        <h2>Captured</h2>
+        <div class="captured">
+          <div>
+            <h3>White</h3>
+            <div id="captured-white" class="captured-row"></div>
+          </div>
+          <div>
+            <h3>Black</h3>
+            <div id="captured-black" class="captured-row"></div>
+          </div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="app-footer">
+    <small>Pure HTML/CSS/JS — no backend.</small>
+  </footer>
+
+  <script defer src="chess.js"></script>
+</body>
+</html>
