@@ -60,6 +60,7 @@ const State = {
   turn: COLORS.WHITE,   // 'w' or 'b'
   pieces: new Map(),    // id -> piece
   moveHistory: [],
+  lastMove: null,       // {from,to}
 };
 
 function makePiece(type, color, square, index) {
@@ -73,6 +74,7 @@ function parseFEN(fen) {
 
   State.board.clear();
   State.pieces.clear();
+  State.lastMove = null;
 
   const counters = { w:{K:0,Q:0,R:0,B:0,N:0,P:0}, b:{K:0,Q:0,R:0,B:0,N:0,P:0} };
 
@@ -107,6 +109,15 @@ function clearPiecesFromDOM() {
 function renderPieces() {
   clearPiecesFromDOM();
 
+  // last move highlight
+  boardEl.querySelectorAll(".last-move").forEach(el => el.classList.remove("last-move"));
+  if (State.lastMove) {
+    const fromEl = document.getElementById(State.lastMove.from);
+    const toEl = document.getElementById(State.lastMove.to);
+    fromEl?.classList.add("last-move");
+    toEl?.classList.add("last-move");
+  }
+
   for (const [square, piece] of State.board.entries()) {
     if (!piece) continue;
     const sqEl = document.getElementById(square);
@@ -128,10 +139,26 @@ function nameOf(type) {
 
 function updateTurnBanner() {
   const el = document.getElementById("turn-indicator");
-  el.textContent = State.turn === "w" ? "White to move" : "Black to move";
+  const side = State.turn === "w" ? "White" : "Black";
+  const inCheck = isKingInCheck(State.turn);
+  el.innerHTML = `${side} to move${inCheck ? ' <span class="check-badge">CHECK</span>' : ''}`;
 }
 
-// --- Step 4 (kept): selection & pseudo-legal moves ---------------------------
+// --- Utilities ---------------------------------------------------------------
+
+function parseSquare(square) {
+  const fileIdx = FILES.indexOf(square[0]);
+  const rank = Number(square.slice(1));
+  return { fileIdx, rank };
+}
+
+function getPieceAt(square) { return State.board.get(square) || null; }
+function setPieceAt(square, pieceOrNull) {
+  if (pieceOrNull) State.board.set(square, pieceOrNull);
+  else State.board.delete(square);
+}
+
+// --- Step 4: selection & pseudo-legal moves ---------------------------------
 const UI = {
   selected: null, // piece id
   hints: [],      // cached moves for selected piece
@@ -200,7 +227,7 @@ function pseudoLegalMoves(piece) {
     const dir = piece.color === "w" ? 1 : -1;
     // forward one
     add(fileIdx, rank + dir, false, true);
-    // forward two from start rank
+    // forward two from start rank (must be clear)
     const startRank = piece.color === "w" ? 2 : 7;
     if (rank === startRank) {
       const oneAhead = `${FILES[fileIdx]}${rank + dir}`;
@@ -241,30 +268,101 @@ function pseudoLegalMoves(piece) {
   return res;
 }
 
-function parseSquare(square) {
-  const fileIdx = FILES.indexOf(square[0]);
-  const rank = Number(square.slice(1));
-  return { fileIdx, rank };
+// --- Step 6: attack map & check info ----------------------------------------
+
+function findKingSquare(color) {
+  for (const piece of State.pieces.values()) {
+    if (piece.type === "K" && piece.color === color) return piece.square;
+  }
+  return null;
+}
+
+// Return true if `square` is attacked by at least one piece of `byColor`
+function isSquareAttacked(square, byColor) {
+  const { fileIdx, rank } = parseSquare(square);
+
+  // Pawn attacks
+  const pawnDir = byColor === "w" ? 1 : -1;
+  for (const df of [-1, 1]) {
+    const f = fileIdx + df, r = rank + pawnDir;
+    if (f >= 0 && f < 8 && r >= 1 && r <= 8) {
+      const occ = getPieceAt(`${FILES[f]}${r}`);
+      if (occ && occ.color === byColor && occ.type === "P") return true;
+    }
+  }
+
+  // Knight attacks
+  const knightSteps = [[1,2],[2,1],[2,-1],[1,-2],[-1,-2],[-2,-1],[-2,1],[-1,2]];
+  for (const [df, dr] of knightSteps) {
+    const f = fileIdx + df, r = rank + dr;
+    if (f < 0 || f > 7 || r < 1 || r > 8) continue;
+    const occ = getPieceAt(`${FILES[f]}${r}`);
+    if (occ && occ.color === byColor && occ.type === "N") return true;
+  }
+
+  // Sliding attacks
+  const rays = {
+    bishop: [[1,1],[1,-1],[-1,1],[-1,-1]],
+    rook: [[1,0],[-1,0],[0,1],[0,-1]],
+  };
+
+  const rayHits = (dirs, types) => {
+    for (const [df, dr] of dirs) {
+      let f = fileIdx + df, r = rank + dr;
+      while (f >= 0 && f < 8 && r >= 1 && r <= 8) {
+        const occ = getPieceAt(`${FILES[f]}${r}`);
+        if (occ) {
+          if (occ.color === byColor && types.includes(occ.type)) return true;
+          break; // blocked
+        }
+        f += df; r += dr;
+      }
+    }
+    return false;
+  };
+
+  if (rayHits(rays.bishop, ["B","Q"])) return true;
+  if (rayHits(rays.rook, ["R","Q"])) return true;
+
+  // King adjacency
+  const kingSteps = [[1,1],[1,0],[1,-1],[0,1],[0,-1],[-1,1],[-1,0],[-1,-1]];
+  for (const [df, dr] of kingSteps) {
+    const f = fileIdx + df, r = rank + dr;
+    if (f < 0 || f > 7 || r < 1 || r > 8) continue;
+    const occ = getPieceAt(`${FILES[f]}${r}`);
+    if (occ && occ.color === byColor && occ.type === "K") return true;
+  }
+
+  return false;
+}
+
+function isKingInCheck(color) {
+  const kingSq = findKingSquare(color);
+  if (!kingSq) return false;
+  const enemy = color === "w" ? "b" : "w";
+  return isSquareAttacked(kingSq, enemy);
 }
 
 // --- Step 5: execute moves, turn switch, capture, history --------------------
 
 function makeMove(piece, to) {
   const from = piece.square;
-  const target = State.board.get(to);
+  const target = getPieceAt(to);
   let captured = null;
 
-  // capture (if enemy on destination)
   if (target && target.color !== piece.color) {
     captured = target;
     State.pieces.delete(target.id);
   }
 
   // update board map
-  State.board.delete(from);
+  setPieceAt(from, null);
   piece.square = to;
   piece.hasMoved = true;
-  State.board.set(to, piece);
+  setPieceAt(to, piece);
+
+  // remember last move for highlight
+  State.lastMove = { from, to };
 
   // UI updates
   renderPieces();
@@ -284,7 +382,6 @@ function makeMove(piece, to) {
 }
 
 function addCapturedPiece(piece) {
-  // Show pieces that were captured FROM each side
   const containerId = piece.color === "w" ? "captured-white" : "captured-black";
   const row = document.getElementById(containerId);
   const span = document.createElement("span");
@@ -294,7 +391,7 @@ function addCapturedPiece(piece) {
 }
 
 function notationOf(piece, from, to, isCapture) {
-  const p = piece.type === "P" ? "" : piece.type; // simple coordinate-style
+  const p = piece.type === "P" ? "" : piece.type;
   return `${p}${from}${isCapture ? "x" : "–"}${to}`;
 }
 
@@ -315,6 +412,9 @@ function loadPosition(fen = START_FEN) {
   clearHints();
   UI.selected = null;
   UI.hints = [];
+  document.getElementById("move-list").innerHTML = "";
+  document.getElementById("captured-white").innerHTML = "";
+  document.getElementById("captured-black").innerHTML = "";
 }
 
 function init() {
@@ -325,10 +425,6 @@ function init() {
   // Restart
   document.getElementById("btn-restart").addEventListener("click", () => {
     loadPosition(START_FEN);
-    document.getElementById("move-list").innerHTML = "";
-    document.getElementById("captured-white").innerHTML = "";
-    document.getElementById("captured-black").innerHTML = "";
-    State.moveHistory = [];
   });
 
   // Click handling: move if a hinted square is clicked; otherwise select
@@ -337,18 +433,24 @@ function init() {
     if (!sqEl) return;
     const squareId = sqEl.id;
 
-    // if a piece is selected and user clicked a valid destination, make the move
     if (UI.selected) {
       const piece = State.pieces.get(UI.selected);
       if (piece) {
         const mv = UI.hints.find(m => m.to === squareId);
         if (mv) { makeMove(piece, mv.to); return; }
-        // Clicking the same square deselects
         if (squareId === piece.square) { clearHints(); UI.selected = null; UI.hints = []; return; }
       }
     }
-    // otherwise select (or reselect another piece)
     selectSquare(squareId);
+  });
+
+  // UX: Esc or right-click to deselect
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { clearHints(); UI.selected = null; UI.hints = []; }
+  });
+  boardEl.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    clearHints(); UI.selected = null; UI.hints = [];
   });
 }
 
