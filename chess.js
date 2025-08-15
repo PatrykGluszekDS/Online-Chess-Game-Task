@@ -131,10 +131,10 @@ function updateTurnBanner() {
   el.textContent = State.turn === "w" ? "White to move" : "Black to move";
 }
 
-// --- Step 4: Select & highlight pseudo-legal moves ---------------------------
-
+// --- Step 4 (kept): selection & pseudo-legal moves ---------------------------
 const UI = {
   selected: null, // piece id
+  hints: [],      // cached moves for selected piece
 };
 
 function clearHints() {
@@ -147,11 +147,8 @@ function selectSquare(square) {
   clearHints();
 
   const piece = State.board.get(square);
-  if (!piece) { UI.selected = null; return; }
-  if (piece.color !== State.turn) {
-    // Only allow selecting the side to move (helps UX).
-    UI.selected = null; return;
-  }
+  if (!piece) { UI.selected = null; UI.hints = []; return; }
+  if (piece.color !== State.turn) { UI.selected = null; UI.hints = []; return; }
 
   UI.selected = piece.id;
 
@@ -159,6 +156,8 @@ function selectSquare(square) {
   sqEl.classList.add("selected");
 
   const moves = pseudoLegalMoves(piece);
+  UI.hints = moves;
+
   for (const mv of moves) {
     const destEl = document.getElementById(mv.to);
     if (!destEl) continue;
@@ -167,7 +166,6 @@ function selectSquare(square) {
 }
 
 // Compute moves ignoring checks/pins & special moves (no castling/en passant)
-// Includes: pawn (single/double, diagonal captures), knight, bishop, rook, queen, king(1-square).
 function pseudoLegalMoves(piece) {
   const res = [];
   const { fileIdx, rank } = parseSquare(piece.square);
@@ -211,7 +209,7 @@ function pseudoLegalMoves(piece) {
         res.push({ from: piece.square, to: twoAhead, capture: false });
       }
     }
-    // captures
+    // diagonal captures
     const left = fileIdx - 1, right = fileIdx + 1;
     for (const f of [left, right]) {
       if (f < 0 || f > 7) continue;
@@ -249,12 +247,74 @@ function parseSquare(square) {
   return { fileIdx, rank };
 }
 
+// --- Step 5: execute moves, turn switch, capture, history --------------------
+
+function makeMove(piece, to) {
+  const from = piece.square;
+  const target = State.board.get(to);
+  let captured = null;
+
+  // capture (if enemy on destination)
+  if (target && target.color !== piece.color) {
+    captured = target;
+    State.pieces.delete(target.id);
+  }
+
+  // update board map
+  State.board.delete(from);
+  piece.square = to;
+  piece.hasMoved = true;
+  State.board.set(to, piece);
+
+  // UI updates
+  renderPieces();
+  clearHints();
+  UI.selected = null;
+  UI.hints = [];
+
+  // captured panel
+  if (captured) addCapturedPiece(captured);
+
+  // history
+  pushHistory(notationOf(piece, from, to, Boolean(captured)));
+
+  // switch turn
+  State.turn = State.turn === "w" ? "b" : "w";
+  updateTurnBanner();
+}
+
+function addCapturedPiece(piece) {
+  // Show pieces that were captured FROM each side
+  const containerId = piece.color === "w" ? "captured-white" : "captured-black";
+  const row = document.getElementById(containerId);
+  const span = document.createElement("span");
+  span.className = "piece";
+  span.textContent = GLYPH[piece.color][piece.type];
+  row.appendChild(span);
+}
+
+function notationOf(piece, from, to, isCapture) {
+  const p = piece.type === "P" ? "" : piece.type; // simple coordinate-style
+  return `${p}${from}${isCapture ? "x" : "–"}${to}`;
+}
+
+function pushHistory(str) {
+  State.moveHistory.push(str);
+  const li = document.createElement("li");
+  li.textContent = str;
+  const list = document.getElementById("move-list");
+  list.appendChild(li);
+  list.scrollTop = list.scrollHeight;
+}
+
 // --- Lifecycle ----------------------------------------------------------------
 
 function loadPosition(fen = START_FEN) {
   parseFEN(fen);
   renderPieces();
   clearHints();
+  UI.selected = null;
+  UI.hints = [];
 }
 
 function init() {
@@ -268,13 +328,27 @@ function init() {
     document.getElementById("move-list").innerHTML = "";
     document.getElementById("captured-white").innerHTML = "";
     document.getElementById("captured-black").innerHTML = "";
+    State.moveHistory = [];
   });
 
-  // Delegate clicks: select a square to see moves
+  // Click handling: move if a hinted square is clicked; otherwise select
   boardEl.addEventListener("click", (e) => {
     const sqEl = e.target.closest(".square");
     if (!sqEl) return;
-    selectSquare(sqEl.id);
+    const squareId = sqEl.id;
+
+    // if a piece is selected and user clicked a valid destination, make the move
+    if (UI.selected) {
+      const piece = State.pieces.get(UI.selected);
+      if (piece) {
+        const mv = UI.hints.find(m => m.to === squareId);
+        if (mv) { makeMove(piece, mv.to); return; }
+        // Clicking the same square deselects
+        if (squareId === piece.square) { clearHints(); UI.selected = null; UI.hints = []; return; }
+      }
+    }
+    // otherwise select (or reselect another piece)
+    selectSquare(squareId);
   });
 }
 
