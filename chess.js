@@ -61,6 +61,10 @@ const State = {
   pieces: new Map(),    // id -> piece
   moveHistory: [],
   lastMove: null,       // {from,to}
+  gameOver: false,
+  result: null,
+  reason: null,
+  epTarget: null,       // en passant target square like "e3" | null
 };
 
 function makePiece(type, color, square, index) {
@@ -75,6 +79,10 @@ function parseFEN(fen) {
   State.board.clear();
   State.pieces.clear();
   State.lastMove = null;
+  State.gameOver = false;
+  State.result = null;
+  State.reason = null;
+  State.epTarget = null;
 
   const counters = { w:{K:0,Q:0,R:0,B:0,N:0,P:0}, b:{K:0,Q:0,R:0,B:0,N:0,P:0} };
 
@@ -139,6 +147,18 @@ function nameOf(type) {
 
 function updateTurnBanner() {
   const el = document.getElementById("turn-indicator");
+
+  if (State.gameOver) {
+    if (State.reason === "checkmate") {
+      el.innerHTML = `Game over: ${State.result} <span class="mate-badge">CHECKMATE</span>`;
+    } else if (State.reason === "stalemate") {
+      el.innerHTML = `Game over: ${State.result} <span class="stale-badge">STALEMATE</span>`;
+    } else {
+      el.textContent = `Game over: ${State.result}`;
+    }
+    return;
+  }
+
   const side = State.turn === "w" ? "White" : "Black";
   const inCheck = isKingInCheck(State.turn);
   el.innerHTML = `${side} to move${inCheck ? ' <span class="check-badge">CHECK</span>' : ''}`;
@@ -157,11 +177,12 @@ function setPieceAt(square, pieceOrNull) {
   if (pieceOrNull) State.board.set(square, pieceOrNull);
   else State.board.delete(square);
 }
+function colorName(c){ return c === "w" ? "White" : "Black"; }
 
-// --- Step 4: selection & pseudo-legal moves ---------------------------------
+// --- Selection & move hints --------------------------------------------------
 const UI = {
   selected: null, // piece id
-  hints: [],      // cached moves for selected piece
+  hints: [],      // cached (LEGAL) move objects for selected piece
 };
 
 function clearHints() {
@@ -172,6 +193,7 @@ function clearHints() {
 
 function selectSquare(square) {
   clearHints();
+  if (State.gameOver) return;
 
   const piece = State.board.get(square);
   if (!piece) { UI.selected = null; UI.hints = []; return; }
@@ -182,17 +204,23 @@ function selectSquare(square) {
   const sqEl = document.getElementById(square);
   sqEl.classList.add("selected");
 
-  const moves = pseudoLegalMoves(piece);
-  UI.hints = moves;
+  // Generate pseudo moves (incl. special), then filter by king safety.
+  const pseudo = pseudoLegalMoves(piece);
+  const legal = [];
+  for (const mv of pseudo) {
+    if (isMoveLegal(mv)) legal.push(mv);
+  }
+  UI.hints = legal;
 
-  for (const mv of moves) {
+  for (const mv of legal) {
     const destEl = document.getElementById(mv.to);
     if (!destEl) continue;
     destEl.classList.add(mv.capture ? "hint-capture" : "hint-move");
   }
 }
 
-// Compute moves ignoring checks/pins & special moves (no castling/en passant)
+// --- Pseudo move generation (now includes CASTLING & EN PASSANT flags) -------
+
 function pseudoLegalMoves(piece) {
   const res = [];
   const { fileIdx, rank } = parseSquare(piece.square);
@@ -200,14 +228,14 @@ function pseudoLegalMoves(piece) {
   const add = (f, r, captureOnly=false, stopOnHit=true) => {
     if (f < 0 || f > 7 || r < 1 || r > 8) return "stop";
     const to = `${FILES[f]}${r}`;
-    const occ = State.board.get(to);
+    const occ = getPieceAt(to);
     if (occ) {
       if (occ.color !== piece.color) {
-        res.push({ from: piece.square, to, capture: true });
+        res.push({ pid: piece.id, from: piece.square, to, capture: true });
       }
       return "stop";
     } else {
-      if (!captureOnly) res.push({ from: piece.square, to, capture: false });
+      if (!captureOnly) res.push({ pid: piece.id, from: piece.square, to, capture: false });
       return stopOnHit ? undefined : "cont";
     }
   };
@@ -225,6 +253,7 @@ function pseudoLegalMoves(piece) {
 
   if (piece.type === "P") {
     const dir = piece.color === "w" ? 1 : -1;
+
     // forward one
     add(fileIdx, rank + dir, false, true);
     // forward two from start rank (must be clear)
@@ -232,8 +261,8 @@ function pseudoLegalMoves(piece) {
     if (rank === startRank) {
       const oneAhead = `${FILES[fileIdx]}${rank + dir}`;
       const twoAhead = `${FILES[fileIdx]}${rank + 2*dir}`;
-      if (!State.board.get(oneAhead) && !State.board.get(twoAhead)) {
-        res.push({ from: piece.square, to: twoAhead, capture: false });
+      if (!getPieceAt(oneAhead) && !getPieceAt(twoAhead)) {
+        res.push({ pid: piece.id, from: piece.square, to: twoAhead, capture: false, twoStep: true });
       }
     }
     // diagonal captures
@@ -241,9 +270,19 @@ function pseudoLegalMoves(piece) {
     for (const f of [left, right]) {
       if (f < 0 || f > 7) continue;
       const to = `${FILES[f]}${rank + dir}`;
-      const occ = State.board.get(to);
+      const occ = getPieceAt(to);
       if (occ && occ.color !== piece.color) {
-        res.push({ from: piece.square, to, capture: true });
+        res.push({ pid: piece.id, from: piece.square, to, capture: true });
+      }
+    }
+    // EN PASSANT
+    if (State.epTarget) {
+      const { fileIdx: ef, rank: er } = parseSquare(State.epTarget);
+      if (Math.abs(ef - fileIdx) === 1 && er === rank + dir) {
+        res.push({
+          pid: piece.id, from: piece.square, to: State.epTarget,
+          capture: true, enPassant: true
+        });
       }
     }
     return res;
@@ -264,11 +303,42 @@ function pseudoLegalMoves(piece) {
   if (piece.type === "K") {
     const deltas = [[1,1],[1,0],[1,-1],[0,1],[0,-1],[-1,1],[-1,0],[-1,-1]];
     for (const [df, dr] of deltas) add(fileIdx + df, rank + dr, false, true);
+
+    // CASTLING (generate only when path squares are empty & not attacked)
+    if (!piece.hasMoved) {
+      const rankHome = piece.color === "w" ? 1 : 8;
+      const kingSq = `e${rankHome}`;
+      if (piece.square === kingSq && !isKingInCheck(piece.color)) {
+        const enemy = piece.color === "w" ? "b" : "w";
+        // King-side (O-O): rook at h-file; empty f, g; none of e,f,g attacked
+        const rookK = getPieceAt(`h${rankHome}`);
+        if (rookK && rookK.type === "R" && rookK.color === piece.color && !rookK.hasMoved) {
+          const empty = !getPieceAt(`f${rankHome}`) && !getPieceAt(`g${rankHome}`);
+          const safe = !isSquareAttacked(`e${rankHome}`, enemy) &&
+                       !isSquareAttacked(`f${rankHome}`, enemy) &&
+                       !isSquareAttacked(`g${rankHome}`, enemy);
+          if (empty && safe) {
+            res.push({ pid: piece.id, from: kingSq, to: `g${rankHome}`, capture: false, castle: "K" });
+          }
+        }
+        // Queen-side (O-O-O): rook at a-file; empty d,c,b; none of e,d,c attacked
+        const rookQ = getPieceAt(`a${rankHome}`);
+        if (rookQ && rookQ.type === "R" && rookQ.color === piece.color && !rookQ.hasMoved) {
+          const empty = !getPieceAt(`d${rankHome}`) && !getPieceAt(`c${rankHome}`) && !getPieceAt(`b${rankHome}`);
+          const safe = !isSquareAttacked(`e${rankHome}`, enemy) &&
+                       !isSquareAttacked(`d${rankHome}`, enemy) &&
+                       !isSquareAttacked(`c${rankHome}`, enemy);
+          if (empty && safe) {
+            res.push({ pid: piece.id, from: kingSq, to: `c${rankHome}`, capture: false, castle: "Q" });
+          }
+        }
+      }
+    }
   }
   return res;
 }
 
-// --- Step 6: attack map & check info ----------------------------------------
+// --- Attack map & check info -------------------------------------------------
 
 function findKingSquare(color) {
   for (const piece of State.pieces.values()) {
@@ -343,42 +413,272 @@ function isKingInCheck(color) {
   return isSquareAttacked(kingSq, enemy);
 }
 
-// --- Step 5: execute moves, turn switch, capture, history --------------------
+// --- Legality via simulation (supports castle + en passant) ------------------
 
-function makeMove(piece, to) {
+function simulateApply(mv) {
+  const piece = State.pieces.get(mv.pid);
   const from = piece.square;
-  const target = getPieceAt(to);
-  let captured = null;
+  const to = mv.to;
 
-  if (target && target.color !== piece.color) {
-    captured = target;
-    State.pieces.delete(target.id);
+  const undo = {
+    pid: mv.pid,
+    from,
+    to,
+    prevHasMoved: piece.hasMoved,
+    captured: null,
+    capturedSquare: null,
+    rookMove: null,        // {rook, from, to, prevHasMoved}
+    prevEp: State.epTarget,
+    prevType: piece.type,
+  };
+
+  // Remove captured for EP or normal
+  if (mv.enPassant) {
+    // captured pawn is behind 'to' by 1 rank in mover's direction
+    const { fileIdx: tf, rank: tr } = parseSquare(to);
+    const capRank = piece.color === "w" ? tr - 1 : tr + 1;
+    const capSq = `${FILES[tf]}${capRank}`;
+    undo.capturedSquare = capSq;
+    undo.captured = getPieceAt(capSq);
+    if (undo.captured) setPieceAt(capSq, null);
+  } else {
+    const target = getPieceAt(to);
+    if (target) {
+      undo.captured = target;
+      undo.capturedSquare = to;
+      setPieceAt(to, null);
+    }
   }
 
-  // update board map
+  // Move rook for castling
+  if (mv.castle) {
+    const homeRank = piece.color === "w" ? 1 : 8;
+    if (mv.castle === "K") {
+      const rookFrom = `h${homeRank}`, rookTo = `f${homeRank}`;
+      const rook = getPieceAt(rookFrom);
+      if (rook) {
+        undo.rookMove = { rook, from: rookFrom, to: rookTo, prevHasMoved: rook.hasMoved };
+        setPieceAt(rookFrom, null);
+        rook.square = rookTo;
+        rook.hasMoved = true;
+        setPieceAt(rookTo, rook);
+      }
+    } else if (mv.castle === "Q") {
+      const rookFrom = `a${homeRank}`, rookTo = `d${homeRank}`;
+      const rook = getPieceAt(rookFrom);
+      if (rook) {
+        undo.rookMove = { rook, from: rookFrom, to: rookTo, prevHasMoved: rook.hasMoved };
+        setPieceAt(rookFrom, null);
+        rook.square = rookTo;
+        rook.hasMoved = true;
+        setPieceAt(rookTo, rook);
+      }
+    }
+  }
+
+  // Move the piece
   setPieceAt(from, null);
   piece.square = to;
   piece.hasMoved = true;
   setPieceAt(to, piece);
 
-  // remember last move for highlight
+  // For simulation, we don't care about epTarget/promotion updates beyond saving previous
+  return undo;
+}
+
+function simulateUndo(undo) {
+  const piece = State.pieces.get(undo.pid);
+
+  // revert piece
+  setPieceAt(undo.to, null);
+  piece.square = undo.from;
+  piece.hasMoved = undo.prevHasMoved;
+  piece.type = undo.prevType;
+  setPieceAt(undo.from, piece);
+
+  // revert rook (if any)
+  if (undo.rookMove) {
+    setPieceAt(undo.rookMove.to, null);
+    undo.rookMove.rook.square = undo.rookMove.from;
+    undo.rookMove.rook.hasMoved = undo.rookMove.prevHasMoved;
+    setPieceAt(undo.rookMove.from, undo.rookMove.rook);
+  }
+
+  // restore captured
+  if (undo.captured && undo.capturedSquare) {
+    setPieceAt(undo.capturedSquare, undo.captured);
+  }
+
+  // restore ep target
+  State.epTarget = undo.prevEp;
+}
+
+function isMoveLegal(mv) {
+  const piece = State.pieces.get(mv.pid);
+  const undo = simulateApply(mv);
+  const inCheck = isKingInCheck(piece.color);
+  simulateUndo(undo);
+  return !inCheck;
+}
+
+function hasAnyLegalMove(color) {
+  for (const p of State.pieces.values()) {
+    // skip pieces not on board (captured)
+    const occ = getPieceAt(p.square);
+    if (!occ || occ.id !== p.id) continue;
+    if (p.color !== color) continue;
+    const pseudo = pseudoLegalMoves(p);
+    for (const mv of pseudo) {
+      if (isMoveLegal(mv)) return true;
+    }
+  }
+  return false;
+}
+
+// --- Make move (handles castle, en passant, promotion, end states) -----------
+
+function makeMove(mv) {
+  const piece = State.pieces.get(mv.pid);
+  const from = piece.square;
+  const to = mv.to;
+  const enemy = piece.color === "w" ? "b" : "w";
+  let captured = null;
+
+  // en passant capture
+  if (mv.enPassant) {
+    const { fileIdx: tf, rank: tr } = parseSquare(to);
+    const capRank = piece.color === "w" ? tr - 1 : tr + 1;
+    const capSq = `${FILES[tf]}${capRank}`;
+    captured = getPieceAt(capSq);
+    if (captured) {
+      setPieceAt(capSq, null);
+      State.pieces.delete(captured.id);
+    }
+  }
+
+  // normal capture on 'to'
+  const target = getPieceAt(to);
+  if (!captured && target && target.color !== piece.color) {
+    captured = target;
+    State.pieces.delete(target.id);
+    setPieceAt(to, null);
+  }
+
+  // rook move for castling
+  if (mv.castle) {
+    const homeRank = piece.color === "w" ? 1 : 8;
+    if (mv.castle === "K") {
+      const rookFrom = `h${homeRank}`, rookTo = `f${homeRank}`;
+      const rook = getPieceAt(rookFrom);
+      if (rook) {
+        setPieceAt(rookFrom, null);
+        rook.square = rookTo;
+        rook.hasMoved = true;
+        setPieceAt(rookTo, rook);
+      }
+    } else if (mv.castle === "Q") {
+      const rookFrom = `a${homeRank}`, rookTo = `d${homeRank}`;
+      const rook = getPieceAt(rookFrom);
+      if (rook) {
+        setPieceAt(rookFrom, null);
+        rook.square = rookTo;
+        rook.hasMoved = true;
+        setPieceAt(rookTo, rook);
+      }
+    }
+  }
+
+  // move the piece
+  setPieceAt(from, null);
+  piece.square = to;
+  piece.hasMoved = true;
+
+  // PROMOTION
+  if (piece.type === "P") {
+    const lastRank = piece.color === "w" ? 8 : 1;
+    const { rank: toRank } = parseSquare(to);
+    if (toRank === lastRank) {
+      let choice = (prompt("Promote to (q, r, b, n)?", "q") || "q").toLowerCase();
+      const map = { q: "Q", r: "R", b: "B", n: "N" };
+      piece.type = map[choice] || "Q";
+    }
+  }
+
+  setPieceAt(to, piece);
+
+  // remember last move
   State.lastMove = { from, to };
 
-  // UI updates
-  renderPieces();
-  clearHints();
-  UI.selected = null;
-  UI.hints = [];
+  // update EP target (only valid right after a pawn two-step)
+  if (piece.type === "P" && mv.twoStep) {
+    const { fileIdx: ff, rank: fr } = parseSquare(from);
+    const dir = piece.color === "w" ? 1 : -1;
+    State.epTarget = `${FILES[ff]}${fr + dir}`;
+  } else {
+    State.epTarget = null;
+  }
 
   // captured panel
   if (captured) addCapturedPiece(captured);
 
-  // history
-  pushHistory(notationOf(piece, from, to, Boolean(captured)));
+  // opponent check state + mate/stale detection
+  const oppInCheck = isKingInCheck(enemy);
+  const oppHasMove = hasAnyLegalMove(enemy);
 
-  // switch turn
-  State.turn = State.turn === "w" ? "b" : "w";
-  updateTurnBanner();
+  // notation
+  let notation;
+  if (mv.castle === "K") notation = "O-O";
+  else if (mv.castle === "Q") notation = "O-O-O";
+  else {
+    const p = piece.type === "P" ? "" : piece.type;
+    notation = `${p}${from}${(captured || mv.enPassant) ? "x" : "–"}${to}`;
+    if ((piece.type !== "P") && (piece.type === "Q" || piece.type === "R" || piece.type === "B" || piece.type === "N") && (from[0] !== to[0])) {
+      // (lightweight; we don't disambiguate fully)
+    }
+    if (mv.enPassant) notation += " e.p.";
+    if ((piece.type !== "P") && (from === to)) {} // placeholder
+    // promotion marker
+    // If we promoted, piece.type is now new type; add "=X" when from pawn reaching last rank
+    const fromRank = Number(from.slice(1)), toRank = Number(to.slice(1));
+    const wasPawnMove = /[1-8]/.test(from[1]) && /[1-8]/.test(to[1]); // cheap check
+    if (wasPawnMove && (fromRank === 7 && toRank === 8 && colorName(State.turn)==="White" || fromRank === 2 && toRank === 1 && colorName(State.turn)==="Black")) {
+      // handled differently; but below is better generic check:
+    }
+    // Better: if a pawn reached last rank, we already changed type; encode "=Type"
+    // We can't easily know it was pawn before, so check mv.promo flag (not set). Instead infer:
+    // If destination rank is 1 or 8 and the moving piece just became non-P due to promotion:
+    // (simple approach) append "=Q" if destination rank at edge and original move was a pawn:
+    // We can approximate by: if notation begins with from square (no piece letter) and (to rank is 1 or 8)
+    const toEdge = to.endsWith("1") || to.endsWith("8");
+    if (toEdge && mv.maybePromotion) {
+      notation += `=${piece.type}`;
+    }
+  }
+
+  let suffix = "";
+  if (!oppHasMove && oppInCheck) suffix = "#";
+  else if (oppInCheck) suffix = "+";
+  pushHistory((notation || `${from}–${to}`) + suffix);
+
+  // switch turn or finish
+  if (!oppHasMove) {
+    State.gameOver = true;
+    if (oppInCheck) {
+      State.reason = "checkmate";
+      State.result = piece.color === "w" ? "1-0" : "0-1";
+    } else {
+      State.reason = "stalemate";
+      State.result = "1/2-1/2";
+    }
+  } else {
+    State.turn = enemy;
+  }
+
+  // UI
+  renderPieces();
+  clearHints();
+  UI.selected = null;
+  UI.hints = [];
 }
 
 function addCapturedPiece(piece) {
@@ -388,11 +688,6 @@ function addCapturedPiece(piece) {
   span.className = "piece";
   span.textContent = GLYPH[piece.color][piece.type];
   row.appendChild(span);
-}
-
-function notationOf(piece, from, to, isCapture) {
-  const p = piece.type === "P" ? "" : piece.type;
-  return `${p}${from}${isCapture ? "x" : "–"}${to}`;
 }
 
 function pushHistory(str) {
@@ -430,16 +725,14 @@ function init() {
   // Click handling: move if a hinted square is clicked; otherwise select
   boardEl.addEventListener("click", (e) => {
     const sqEl = e.target.closest(".square");
-    if (!sqEl) return;
+    if (!sqEl || State.gameOver) return;
     const squareId = sqEl.id;
 
     if (UI.selected) {
+      const mv = UI.hints.find(m => m.to === squareId);
+      if (mv) { makeMove(mv); return; }
       const piece = State.pieces.get(UI.selected);
-      if (piece) {
-        const mv = UI.hints.find(m => m.to === squareId);
-        if (mv) { makeMove(piece, mv.to); return; }
-        if (squareId === piece.square) { clearHints(); UI.selected = null; UI.hints = []; return; }
-      }
+      if (piece && squareId === piece.square) { clearHints(); UI.selected = null; UI.hints = []; return; }
     }
     selectSquare(squareId);
   });

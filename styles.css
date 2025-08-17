@@ -164,3 +164,25 @@ body{
 .square { cursor: default; }
 .piece { cursor: pointer; }
 
+/* --- Step 7: mate/stalemate badges --- */
+.status .mate-badge{
+  display:inline-block;
+  margin-left:8px;
+  padding:2px 6px;
+  border-radius:10px;
+  background:#d00000;
+  color:#fff;
+  font-size:12px;
+  font-weight:700;
+}
+.status .stale-badge{
+  display:inline-block;
+  margin-left:8px;
+  padding:2px 6px;
+  border-radius:10px;
+  background:#495057;
+  color:#fff;
+  font-size:12px;
+  font-weight:700;
+}
+
